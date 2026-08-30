@@ -1,13 +1,17 @@
 name: checks
-on: [pull_request, workflow_dispatch]
+
+on:
+  pull_request:
+    branches: [forked-release]
+  workflow_dispatch: {}
 
 concurrency:
   cancel-in-progress: true
   group: ${{ github.workflow }}-${{ github.ref }}
 
 env:
-  ACT_OWNER: ${{ github.repository_owner }}
-  ACT_REPOSITORY: ${{ github.repository }}
+  ACT_OWNER: nektos
+  ACT_REPOSITORY: nektos/act
   CGO_ENABLED: 0
 
 jobs:
@@ -26,7 +30,7 @@ jobs:
           version: v2.11.4
       - uses: megalinter/megalinter/flavors/go@ec124f7998718d79379a3c5b39f5359952baf21d # v8.4.2
         env:
-          DEFAULT_BRANCH: master
+          DEFAULT_BRANCH: forked-release
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VALIDATE_ALL_CODEBASE: false
           GITHUB_STATUS_REPORTER: ${{ !env.ACT }}
@@ -35,6 +39,8 @@ jobs:
   test-linux:
     name: test-linux
     runs-on: ubuntu-latest
+    env:
+      CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -44,8 +50,13 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
+      - name: Use upstream repository identity for tests
+        run: git remote set-url origin https://github.com/nektos/act
       - name: Run Tests
         run: go run gotest.tools/gotestsum@latest --junitfile unit-tests.xml --format pkgname -- -v -cover -coverpkg=./... -coverprofile=coverage.txt -covermode=atomic -timeout 20m ./...
+      - name: Restore fork repository identity
+        if: always()
+        run: git remote set-url origin "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY"
       - name: Test Summary
         uses: test-summary/action@31493c76ec9e7aa675f1585d3ed6f1da69269a86 # v2.4
         with:
@@ -56,11 +67,12 @@ jobs:
       - name: Run act from cli without docker support
         run: go run -tags WITHOUT_DOCKER main.go -P ubuntu-latest=-self-hosted -C ./pkg/runner/testdata/ -W ./local-action-js/push.yml
       - name: Upload Codecov report
-        uses: codecov/codecov-action@1af58845a975a7985b0beb0cbe6fbbb71a41dbad # v5
+        if: env.CODECOV_TOKEN != ''
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
         with:
           files: coverage.txt
           fail_ci_if_error: true # optional (default = false)
-          token: ${{ secrets.CODECOV_TOKEN }}
+          token: ${{ env.CODECOV_TOKEN }}
 
   test-host:
     strategy:

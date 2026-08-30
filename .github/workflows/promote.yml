@@ -7,6 +7,7 @@ on:
 jobs:
   release:
     name: promote
+    if: github.repository == 'nektos/act'
     runs-on: ubuntu-latest
     environment: promote
     steps:
