@@ -4,12 +4,15 @@ import (
 	"context"
 	"io"
 	"io/fs"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/nektos/act/pkg/model"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 )
 
 type closerMock struct {
@@ -248,4 +251,57 @@ func TestActionRunner(t *testing.T) {
 			cm.AssertExpectations(t)
 		})
 	}
+}
+
+type actionCopyCache struct {
+	fetches int
+	reads   int
+}
+
+func (cache *actionCopyCache) Fetch(context.Context, string, string, string, string) (string, error) {
+	cache.fetches++
+	return "", nil
+}
+
+func (cache *actionCopyCache) GetTarArchive(context.Context, string, string, string) (io.ReadCloser, error) {
+	cache.reads++
+	return io.NopCloser(strings.NewReader("")), nil
+}
+
+func TestSelfRepositoryActionCopiesDirectorySource(t *testing.T) {
+	ctx := context.Background()
+	workdir := t.TempDir()
+	gitignore := filepath.Join(workdir, ".gitignore")
+	require.NoError(t, os.WriteFile(gitignore, []byte("ignored\n"), 0o600))
+
+	globalCache := &actionCopyCache{}
+	container := &containerMock{}
+	container.On("CopyDir", "/var/run/act/actions/owner-repo@sha/", workdir+"/", true).
+		Return(func(context.Context) error { return nil })
+
+	rc := &RunContext{
+		Config: &Config{
+			ActionCache:  globalCache,
+			UseGitIgnore: true,
+			Workdir:      workdir,
+		},
+		JobContainer: container,
+	}
+	action := &stepActionRemote{
+		Step:       &model.Step{Uses: "$/actions/tool"},
+		RunContext: rc,
+		repositorySource: repositorySource{
+			directory:  workdir,
+			repository: "owner/repo",
+			sha:        "sha",
+		},
+	}
+
+	err := maybeCopyToActionDir(ctx, action, workdir, "actions/tool", "/var/run/act/actions/owner-repo@sha/actions/tool")
+
+	require.NoError(t, err)
+	assert.Zero(t, globalCache.fetches)
+	assert.Zero(t, globalCache.reads)
+	assert.FileExists(t, gitignore)
+	container.AssertExpectations(t)
 }

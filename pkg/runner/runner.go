@@ -89,15 +89,17 @@ type caller struct {
 }
 
 type runnerImpl struct {
-	config    *Config
-	eventJSON string
-	caller    *caller // the job calling this runner (caller of a reusable workflow)
+	config           *Config
+	eventJSON        string
+	caller           *caller // the job calling this runner (caller of a reusable workflow)
+	repositorySource repositorySource
 }
 
 // New Creates a new Runner
 func New(runnerConfig *Config) (Runner, error) {
 	runner := &runnerImpl{
-		config: runnerConfig,
+		config:           runnerConfig,
+		repositorySource: repositorySource{directory: runnerConfig.Workdir},
 	}
 
 	return runner.configure()
@@ -259,12 +261,13 @@ func selectMatrixes(originalMatrixes []map[string]interface{}, targetMatrixValue
 
 func (runner *runnerImpl) newRunContext(ctx context.Context, run *model.Run, matrix map[string]interface{}) *RunContext {
 	rc := &RunContext{
-		Config:      runner.config,
-		Run:         run,
-		EventJSON:   runner.eventJSON,
-		StepResults: make(map[string]*model.StepResult),
-		Matrix:      matrix,
-		caller:      runner.caller,
+		Config:           runner.config,
+		Run:              run,
+		EventJSON:        runner.eventJSON,
+		StepResults:      make(map[string]*model.StepResult),
+		Matrix:           matrix,
+		caller:           runner.caller,
+		repositorySource: runner.repositorySource,
 	}
 	rc.ExprEval = rc.NewExpressionEvaluator(ctx)
 	rc.Name = rc.ExprEval.Interpolate(ctx, run.String())

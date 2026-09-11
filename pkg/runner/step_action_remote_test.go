@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"archive/tar"
 	"bytes"
 	"context"
 	"errors"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
 
 	"github.com/nektos/act/pkg/common"
@@ -19,6 +21,39 @@ import (
 
 type stepActionRemoteMocks struct {
 	mock.Mock
+}
+
+type selfReferenceActionCache struct {
+	fetches int
+	reads   []workflowCacheRead
+}
+
+func (cache *selfReferenceActionCache) Fetch(context.Context, string, string, string, string) (string, error) {
+	cache.fetches++
+	return "", errors.New("self repository action unexpectedly fetched its repository")
+}
+
+func (cache *selfReferenceActionCache) GetTarArchive(_ context.Context, cacheDir, sha, includePrefix string) (io.ReadCloser, error) {
+	cache.reads = append(cache.reads, workflowCacheRead{cacheDir: cacheDir, sha: sha, path: includePrefix})
+	action := []byte(`name: self repository action
+runs:
+  using: node20
+  pre: pre.js
+  main: main.js
+  post: post.js
+`)
+	var archive bytes.Buffer
+	twriter := tar.NewWriter(&archive)
+	if err := twriter.WriteHeader(&tar.Header{Name: includePrefix, Mode: 0o644, Size: int64(len(action))}); err != nil {
+		return nil, err
+	}
+	if _, err := twriter.Write(action); err != nil {
+		return nil, err
+	}
+	if err := twriter.Close(); err != nil {
+		return nil, err
+	}
+	return io.NopCloser(bytes.NewReader(archive.Bytes())), nil
 }
 
 func (sarm *stepActionRemoteMocks) readAction(_ context.Context, step *model.Step, actionDir string, actionPath string, readFile actionYamlReader, writeFile fileWriter) (*model.Action, error) {
@@ -204,6 +239,56 @@ func TestStepActionRemote(t *testing.T) {
 			cm.AssertExpectations(t)
 		})
 	}
+}
+
+func TestSelfRepositoryActionUsesExistingRepositoryRevision(t *testing.T) {
+	ctx := context.Background()
+	cache := &selfReferenceActionCache{}
+	source := repositorySource{
+		actionCache: cache,
+		cacheDir:    "owner/repo@ci",
+		sha:         "resolved-ci-sha",
+		repository:  "owner/repo",
+		ref:         "ci",
+	}
+	rc := &RunContext{
+		Config: &Config{
+			ActionCache:    cache,
+			Env:            map[string]string{"GITHUB_REPOSITORY": "owner/repo"},
+			GitHubInstance: "github.com",
+			Workdir:        t.TempDir(),
+		},
+		Run: &model.Run{
+			JobID: "job",
+			Workflow: &model.Workflow{
+				Jobs: map[string]*model.Job{"job": {}},
+			},
+		},
+		repositorySource: source,
+	}
+	rc.ExprEval = rc.NewExpressionEvaluator(ctx)
+
+	created, err := (&stepFactoryImpl{}).newStep(&model.Step{Uses: "$/actions/tool"}, rc)
+	require.NoError(t, err)
+	action := created.(*stepActionRemote)
+	require.NoError(t, action.prepareActionExecutor()(ctx))
+
+	assert.Zero(t, cache.fetches)
+	assert.Equal(t, []workflowCacheRead{{
+		cacheDir: "owner/repo@ci",
+		sha:      "resolved-ci-sha",
+		path:     "actions/tool/action.yml",
+	}}, cache.reads)
+	assert.Equal(t, source, action.repositorySource)
+	assert.Equal(t, &remoteAction{
+		Org:  "owner",
+		Repo: "repo",
+		Path: "actions/tool",
+		Ref:  "resolved-ci-sha",
+		URL:  "https://github.com",
+	}, action.remoteAction)
+	assert.Equal(t, "pre.js", action.action.Runs.Pre)
+	assert.Equal(t, "post.js", action.action.Runs.Post)
 }
 
 func TestStepActionRemotePre(t *testing.T) {

@@ -13,6 +13,10 @@ type stepFactory interface {
 type stepFactoryImpl struct{}
 
 func (sf *stepFactoryImpl) newStep(stepModel *model.Step, rc *RunContext) (step, error) {
+	if _, _, err := model.ParseSelfRepositoryReference(stepModel.Uses); err != nil {
+		return nil, err
+	}
+
 	switch stepModel.Type() {
 	case model.StepTypeInvalid:
 		return nil, fmt.Errorf("Invalid run/uses syntax for job:%s step:%+v", rc.Run, stepModel)
