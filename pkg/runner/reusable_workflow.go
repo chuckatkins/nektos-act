@@ -1,23 +1,24 @@
 package runner
 
 import (
-	"archive/tar"
 	"context"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
-	"path"
 	"regexp"
 	"sync"
 
 	"github.com/nektos/act/pkg/common"
 	"github.com/nektos/act/pkg/common/git"
-	"github.com/nektos/act/pkg/model"
 )
 
 func newLocalReusableWorkflowExecutor(rc *RunContext) common.Executor {
-	return newReusableWorkflowExecutor(rc, rc.Config.Workdir, rc.Run.Job().Uses)
+	source := rc.repositorySource
+	if source.directory == "" && source.actionCache == nil {
+		source.directory = rc.Config.Workdir
+	}
+	return newReusableWorkflowExecutor(rc, source, rc.Run.Job().Uses)
 }
 
 func newRemoteReusableWorkflowExecutor(rc *RunContext) common.Executor {
@@ -40,7 +41,7 @@ func newRemoteReusableWorkflowExecutor(rc *RunContext) common.Executor {
 
 	return common.NewPipelineExecutor(
 		newMutexExecutor(cloneIfRequired(rc, *remoteReusableWorkflow, workflowDir)),
-		newReusableWorkflowExecutor(rc, workflowDir, fmt.Sprintf("./.github/workflows/%s", remoteReusableWorkflow.Filename)),
+		newReusableWorkflowExecutor(rc, repositorySource{directory: workflowDir}, fmt.Sprintf("./.github/workflows/%s", remoteReusableWorkflow.Filename)),
 	)
 }
 
@@ -52,30 +53,12 @@ func newActionCacheReusableWorkflowExecutor(rc *RunContext, filename string, rem
 		if err != nil {
 			return err
 		}
-		archive, err := rc.Config.ActionCache.GetTarArchive(ctx, filename, sha, fmt.Sprintf(".github/workflows/%s", remoteReusableWorkflow.Filename))
-		if err != nil {
-			return err
+		source := repositorySource{
+			actionCache: rc.Config.ActionCache,
+			cacheDir:    filename,
+			sha:         sha,
 		}
-		defer archive.Close()
-		treader := tar.NewReader(archive)
-		if _, err = treader.Next(); err != nil {
-			return err
-		}
-		planner, err := model.NewSingleWorkflowPlanner(remoteReusableWorkflow.Filename, treader)
-		if err != nil {
-			return err
-		}
-		plan, err := planner.PlanEvent("workflow_call")
-		if err != nil {
-			return err
-		}
-
-		runner, err := NewReusableWorkflowRunner(rc)
-		if err != nil {
-			return err
-		}
-
-		return runner.NewPlanExecutor(plan)(ctx)
+		return newReusableWorkflowExecutor(rc, source, fmt.Sprintf(".github/workflows/%s", remoteReusableWorkflow.Filename))(ctx)
 	}
 }
 
@@ -113,9 +96,9 @@ func cloneIfRequired(rc *RunContext, remoteReusableWorkflow remoteReusableWorkfl
 	)
 }
 
-func newReusableWorkflowExecutor(rc *RunContext, directory string, workflow string) common.Executor {
+func newReusableWorkflowExecutor(rc *RunContext, source repositorySource, workflow string) common.Executor {
 	return func(ctx context.Context) error {
-		planner, err := model.NewWorkflowPlanner(path.Join(directory, workflow), true, false)
+		planner, err := source.workflowPlanner(ctx, workflow)
 		if err != nil {
 			return err
 		}
@@ -125,7 +108,7 @@ func newReusableWorkflowExecutor(rc *RunContext, directory string, workflow stri
 			return err
 		}
 
-		runner, err := NewReusableWorkflowRunner(rc)
+		runner, err := newReusableWorkflowRunner(rc, source)
 		if err != nil {
 			return err
 		}
@@ -135,9 +118,18 @@ func newReusableWorkflowExecutor(rc *RunContext, directory string, workflow stri
 }
 
 func NewReusableWorkflowRunner(rc *RunContext) (Runner, error) {
+	source := rc.repositorySource
+	if source.directory == "" && source.actionCache == nil {
+		source.directory = rc.Config.Workdir
+	}
+	return newReusableWorkflowRunner(rc, source)
+}
+
+func newReusableWorkflowRunner(rc *RunContext, source repositorySource) (Runner, error) {
 	runner := &runnerImpl{
-		config:    rc.Config,
-		eventJSON: rc.EventJSON,
+		config:           rc.Config,
+		eventJSON:        rc.EventJSON,
+		repositorySource: source,
 		caller: &caller{
 			runContext: rc,
 		},
