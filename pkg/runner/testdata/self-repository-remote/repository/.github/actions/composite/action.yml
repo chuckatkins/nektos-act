@@ -1,0 +1,13 @@
+name: self repository composite action
+description: Exercises a nested self repository action reference
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        case "$GITHUB_ACTION_PATH" in
+          */owner-repo@ci/.github/actions/composite) ;;
+          *) exit 1 ;;
+        esac
+        test -f "$GITHUB_ACTION_PATH/../../../.github/workflows/outer.yml"
+    - uses: $/.github/actions/javascript

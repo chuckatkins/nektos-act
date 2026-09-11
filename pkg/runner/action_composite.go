@@ -50,6 +50,10 @@ func newCompositeRunContext(ctx context.Context, parent *RunContext, step action
 	// run with the global config but without secrets
 	configCopy := *(parent.Config)
 	configCopy.Secrets = nil
+	repositorySource := parent.repositorySource
+	if remote, ok := step.(*stepActionRemote); ok {
+		repositorySource = remote.repositorySource
+	}
 
 	// create a run context for the composite action to run in
 	compositerc := &RunContext{
@@ -74,6 +78,7 @@ func newCompositeRunContext(ctx context.Context, parent *RunContext, step action
 		ExtraPath:        parent.ExtraPath,
 		Parent:           parent,
 		EventJSON:        parent.EventJSON,
+		repositorySource: repositorySource,
 		nodeToolFullPath: parent.nodeToolFullPath,
 	}
 	compositerc.ExprEval = compositerc.NewExpressionEvaluator(ctx)

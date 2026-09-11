@@ -34,6 +34,16 @@ func TestStepFactoryNewStep(t *testing.T) {
 			},
 		},
 		{
+			name: "StepSelfRepositoryAction",
+			model: &model.Step{
+				Uses: "$/action",
+			},
+			check: func(s step) bool {
+				_, ok := s.(*stepActionRemote)
+				return ok
+			},
+		},
+		{
 			name: "StepDocker",
 			model: &model.Step{
 				Uses: "docker://image:tag",
@@ -65,6 +75,14 @@ func TestStepFactoryNewStep(t *testing.T) {
 			assert.Nil(t, err)
 		})
 	}
+}
+
+func TestStepFactoryRejectsInvalidSelfRepositoryReference(t *testing.T) {
+	sf := &stepFactoryImpl{}
+
+	_, err := sf.newStep(&model.Step{Uses: "$/"}, &RunContext{})
+
+	assert.ErrorContains(t, err, "must include a path")
 }
 
 func TestStepFactoryInvalidStep(t *testing.T) {

@@ -29,8 +29,8 @@ type stepActionRemote struct {
 	action              *model.Action
 	env                 map[string]string
 	remoteAction        *remoteAction
-	cacheDir            string
-	resolvedSha         string
+	repositorySource    repositorySource
+	selfReference       bool
 }
 
 var (
@@ -44,17 +44,37 @@ func (sar *stepActionRemote) prepareActionExecutor() common.Executor {
 			return nil
 		}
 
-		sar.remoteAction = newRemoteAction(sar.Step.Uses)
-		if sar.remoteAction == nil {
-			return fmt.Errorf("Expected format {org}/{repo}[/path]@ref. Actual '%s' Input string was not in a correct format", sar.Step.Uses)
+		selfPath, isSelf, err := model.ParseSelfRepositoryReference(sar.Step.Uses)
+		if err != nil {
+			return err
+		}
+		if isSelf {
+			sar.repositorySource, err = sar.RunContext.resolveRepositorySource(ctx)
+			if err != nil {
+				return err
+			}
+			sar.remoteAction, err = sar.repositorySource.remoteAction(selfPath)
+			if err != nil {
+				return err
+			}
+			sar.selfReference = true
+		} else {
+			sar.remoteAction = newRemoteAction(sar.Step.Uses)
+			if sar.remoteAction == nil {
+				return fmt.Errorf("Expected format {org}/{repo}[/path]@ref. Actual '%s' Input string was not in a correct format", sar.Step.Uses)
+			}
 		}
 
 		github := sar.getGithubContext(ctx)
 		sar.remoteAction.URL = github.ServerURL
 
-		if sar.remoteAction.IsCheckout() && isLocalCheckout(github, sar.Step) && !sar.RunContext.Config.NoSkipCheckout {
+		if !sar.selfReference && sar.remoteAction.IsCheckout() && isLocalCheckout(github, sar.Step) && !sar.RunContext.Config.NoSkipCheckout {
 			common.Logger(ctx).Debugf("Skipping local actions/checkout because workdir was already copied")
 			return nil
+		}
+
+		if sar.selfReference {
+			return sar.readActionFromSource(ctx)
 		}
 
 		for _, action := range sar.RunContext.Config.ReplaceGheActionWithGithubCom {
@@ -66,44 +86,21 @@ func (sar *stepActionRemote) prepareActionExecutor() common.Executor {
 		if sar.RunContext.Config.ActionCache != nil {
 			cache := sar.RunContext.Config.ActionCache
 
-			var err error
-			sar.cacheDir = fmt.Sprintf("%s/%s", sar.remoteAction.Org, sar.remoteAction.Repo)
-			repoURL := sar.remoteAction.URL + "/" + sar.cacheDir
+			cacheDir := fmt.Sprintf("%s/%s", sar.remoteAction.Org, sar.remoteAction.Repo)
+			repoURL := sar.remoteAction.URL + "/" + cacheDir
 			repoRef := sar.remoteAction.Ref
-			sar.resolvedSha, err = cache.Fetch(ctx, sar.cacheDir, repoURL, repoRef, github.Token)
+			resolvedSha, err := cache.Fetch(ctx, cacheDir, repoURL, repoRef, github.Token)
 			if err != nil {
 				return fmt.Errorf("failed to fetch \"%s\" version \"%s\": %w", repoURL, repoRef, err)
 			}
-
-			remoteReader := func(ctx context.Context) actionYamlReader {
-				return func(filename string) (io.Reader, io.Closer, error) {
-					spath := path.Join(sar.remoteAction.Path, filename)
-					for i := 0; i < maxSymlinkDepth; i++ {
-						tars, err := cache.GetTarArchive(ctx, sar.cacheDir, sar.resolvedSha, spath)
-						if err != nil {
-							return nil, nil, os.ErrNotExist
-						}
-						treader := tar.NewReader(tars)
-						header, err := treader.Next()
-						if err != nil {
-							return nil, nil, os.ErrNotExist
-						}
-						if header.FileInfo().Mode()&os.ModeSymlink == os.ModeSymlink {
-							spath, err = symlinkJoin(spath, header.Linkname, ".")
-							if err != nil {
-								return nil, nil, err
-							}
-						} else {
-							return treader, tars, nil
-						}
-					}
-					return nil, nil, fmt.Errorf("max depth %d of symlinks exceeded while reading %s", maxSymlinkDepth, spath)
-				}
+			sar.repositorySource = repositorySource{
+				actionCache: cache,
+				cacheDir:    cacheDir,
+				sha:         resolvedSha,
+				repository:  fmt.Sprintf("%s/%s", sar.remoteAction.Org, sar.remoteAction.Repo),
+				ref:         repoRef,
 			}
-
-			actionModel, err := sar.readAction(ctx, sar.Step, sar.resolvedSha, sar.remoteAction.Path, remoteReader(ctx), os.WriteFile)
-			sar.action = actionModel
-			return err
+			return sar.readActionFromSource(ctx)
 		}
 
 		actionDir := fmt.Sprintf("%s/%s", sar.RunContext.ActionCacheDir(), safeFilename(sar.Step.Uses))
@@ -126,22 +123,80 @@ func (sar *stepActionRemote) prepareActionExecutor() common.Executor {
 			}
 		}
 
-		remoteReader := func(_ context.Context) actionYamlReader {
-			return func(filename string) (io.Reader, io.Closer, error) {
-				f, err := os.Open(filepath.Join(actionDir, sar.remoteAction.Path, filename))
-				return f, f, err
-			}
+		sar.repositorySource = repositorySource{
+			directory:  actionDir,
+			repository: fmt.Sprintf("%s/%s", sar.remoteAction.Org, sar.remoteAction.Repo),
+			ref:        sar.remoteAction.Ref,
 		}
 
 		return common.NewPipelineExecutor(
 			ntErr,
-			func(ctx context.Context) error {
-				actionModel, err := sar.readAction(ctx, sar.Step, actionDir, sar.remoteAction.Path, remoteReader(ctx), os.WriteFile)
-				sar.action = actionModel
-				return err
-			},
+			sar.readActionFromSource,
 		)(ctx)
 	}
+}
+
+func (sar *stepActionRemote) readActionFromSource(ctx context.Context) error {
+	source := sar.repositorySource
+	if source.actionCache != nil {
+		remoteReader := func(filename string) (io.Reader, io.Closer, error) {
+			spath := path.Join(sar.remoteAction.Path, filename)
+			for i := 0; i < maxSymlinkDepth; i++ {
+				tars, err := source.actionCache.GetTarArchive(ctx, source.cacheDir, source.sha, spath)
+				if err != nil {
+					return nil, nil, os.ErrNotExist
+				}
+				treader := tar.NewReader(tars)
+				header, err := treader.Next()
+				if err != nil {
+					return nil, nil, os.ErrNotExist
+				}
+				if header.FileInfo().Mode()&os.ModeSymlink == os.ModeSymlink {
+					spath, err = symlinkJoin(spath, header.Linkname, ".")
+					if err != nil {
+						return nil, nil, err
+					}
+				} else {
+					return treader, tars, nil
+				}
+			}
+			return nil, nil, fmt.Errorf("max depth %d of symlinks exceeded while reading %s", maxSymlinkDepth, spath)
+		}
+
+		actionModel, err := sar.readAction(ctx, sar.Step, source.sha, sar.remoteAction.Path, remoteReader, os.WriteFile)
+		sar.action = actionModel
+		return err
+	}
+
+	remoteReader := func(filename string) (io.Reader, io.Closer, error) {
+		f, err := os.Open(filepath.Join(source.directory, sar.remoteAction.Path, filename))
+		return f, f, err
+	}
+	actionModel, err := sar.readAction(ctx, sar.Step, source.directory, sar.remoteAction.Path, remoteReader, os.WriteFile)
+	sar.action = actionModel
+	return err
+}
+
+func (sar *stepActionRemote) actionDir() string {
+	if sar.repositorySource.directory != "" {
+		return sar.repositorySource.directory
+	}
+	return fmt.Sprintf("%s/%s", sar.RunContext.ActionCacheDir(), safeFilename(sar.Step.Uses))
+}
+
+func (sar *stepActionRemote) actionPath() string {
+	if sar.remoteAction == nil {
+		return ""
+	}
+	return sar.remoteAction.Path
+}
+
+func (sar *stepActionRemote) actionLocation() string {
+	key := sar.Step.Uses
+	if sar.selfReference {
+		key = fmt.Sprintf("%s@%s", sar.repositorySource.repository, sar.repositorySource.revision())
+	}
+	return path.Join(sar.RunContext.ActionCacheDir(), safeFilename(key), sar.actionPath())
 }
 
 func (sar *stepActionRemote) pre() common.Executor {
@@ -157,7 +212,7 @@ func (sar *stepActionRemote) main() common.Executor {
 		sar.prepareActionExecutor(),
 		runStepExecutor(sar, stepStageMain, func(ctx context.Context) error {
 			github := sar.getGithubContext(ctx)
-			if sar.remoteAction.IsCheckout() && isLocalCheckout(github, sar.Step) && !sar.RunContext.Config.NoSkipCheckout {
+			if !sar.selfReference && sar.remoteAction.IsCheckout() && isLocalCheckout(github, sar.Step) && !sar.RunContext.Config.NoSkipCheckout {
 				if sar.RunContext.Config.BindWorkdir {
 					common.Logger(ctx).Debugf("Skipping local actions/checkout because you bound your workspace")
 					return nil
@@ -167,9 +222,7 @@ func (sar *stepActionRemote) main() common.Executor {
 				return sar.RunContext.JobContainer.CopyDir(copyToPath, sar.RunContext.Config.Workdir+string(filepath.Separator)+".", sar.RunContext.Config.UseGitIgnore)(ctx)
 			}
 
-			actionDir := fmt.Sprintf("%s/%s", sar.RunContext.ActionCacheDir(), safeFilename(sar.Step.Uses))
-
-			return sar.runAction(sar, actionDir, sar.remoteAction)(ctx)
+			return sar.runAction(sar, sar.actionDir(), sar.remoteAction)(ctx)
 		}),
 	)
 }
@@ -207,7 +260,7 @@ func (sar *stepActionRemote) getIfExpression(ctx context.Context, stage stepStag
 	switch stage {
 	case stepStagePre:
 		github := sar.getGithubContext(ctx)
-		if sar.remoteAction.IsCheckout() && isLocalCheckout(github, sar.Step) && !sar.RunContext.Config.NoSkipCheckout {
+		if !sar.selfReference && sar.remoteAction.IsCheckout() && isLocalCheckout(github, sar.Step) && !sar.RunContext.Config.NoSkipCheckout {
 			// skip local checkout pre step
 			return "false"
 		}
@@ -226,9 +279,7 @@ func (sar *stepActionRemote) getActionModel() *model.Action {
 
 func (sar *stepActionRemote) getCompositeRunContext(ctx context.Context) *RunContext {
 	if sar.compositeRunContext == nil {
-		actionDir := fmt.Sprintf("%s/%s", sar.RunContext.ActionCacheDir(), safeFilename(sar.Step.Uses))
-		actionLocation := path.Join(actionDir, sar.remoteAction.Path)
-		_, containerActionDir := getContainerActionPaths(sar.getStepModel(), actionLocation, sar.RunContext)
+		_, containerActionDir := getContainerActionPaths(sar.getStepModel(), sar.actionLocation(), sar.RunContext)
 
 		sar.compositeRunContext = newCompositeRunContext(ctx, sar.RunContext, sar, containerActionDir)
 		sar.compositeSteps = sar.compositeRunContext.compositeExecutor(sar.action)

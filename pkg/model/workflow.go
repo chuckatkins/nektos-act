@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path"
 	"reflect"
 	"regexp"
 	"strconv"
@@ -531,12 +532,20 @@ func (j *Job) Type() (JobType, error) {
 	isReusable := j.Uses != ""
 
 	if isReusable {
-		isYaml, _ := regexp.MatchString(`\.(ya?ml)(?:$|@)`, j.Uses)
+		uses := j.Uses
+		if selfPath, isSelf, err := ParseSelfRepositoryReference(uses); isSelf {
+			if err != nil {
+				return JobTypeInvalid, err
+			}
+			uses = "./" + selfPath
+		}
+
+		isYaml, _ := regexp.MatchString(`\.(ya?ml)(?:$|@)`, uses)
 
 		if isYaml {
-			isLocalPath := strings.HasPrefix(j.Uses, "./")
-			isRemotePath, _ := regexp.MatchString(`^[^.](.+?/){2,}.+\.ya?ml@`, j.Uses)
-			hasVersion, _ := regexp.MatchString(`\.ya?ml@`, j.Uses)
+			isLocalPath := strings.HasPrefix(uses, "./")
+			isRemotePath, _ := regexp.MatchString(`^[^.](.+?/){2,}.+\.ya?ml@`, uses)
+			hasVersion, _ := regexp.MatchString(`\.ya?ml@`, uses)
 
 			if isLocalPath {
 				return JobTypeReusableWorkflowLocal, nil
@@ -545,7 +554,7 @@ func (j *Job) Type() (JobType, error) {
 			}
 		}
 
-		return JobTypeInvalid, fmt.Errorf("`uses` key references invalid workflow path '%s'. Must start with './' if it's a local workflow, or must start with '<org>/<repo>/' and include an '@' if it's a remote workflow", j.Uses)
+		return JobTypeInvalid, fmt.Errorf("`uses` key references invalid workflow path '%s'. Must start with './' if it's a local workflow, '$/' if it references the same repository, or must start with '<org>/<repo>/' and include an '@' if it's a remote workflow", j.Uses)
 	}
 
 	return JobTypeDefault, nil
@@ -654,7 +663,7 @@ const (
 	// StepTypeUsesActionLocal is all steps that have a `uses` that is a local action in a subdirectory
 	StepTypeUsesActionLocal
 
-	// StepTypeUsesActionRemote is all steps that have a `uses` that is a reference to a github repo
+	// StepTypeUsesActionRemote is all steps that have a `uses` that is a reference to a GitHub repo or $/
 	StepTypeUsesActionRemote
 
 	// StepTypeReusableWorkflowLocal is all steps that have a `uses` that is a local workflow in the .github/workflows directory
@@ -687,10 +696,45 @@ func (s StepType) String() string {
 	return "unknown"
 }
 
+// ParseSelfRepositoryReference parses a $/ reference and returns its
+// repository-relative path. The boolean result reports whether uses is a $/
+// reference.
+func ParseSelfRepositoryReference(uses string) (string, bool, error) {
+	if !strings.HasPrefix(uses, "$/") {
+		return "", false, nil
+	}
+
+	referencePath := strings.TrimLeft(strings.TrimPrefix(uses, "$/"), "/")
+	if referencePath == "" {
+		return "", true, fmt.Errorf("self repository reference '%s' must include a path after '$/'", uses)
+	}
+	if strings.Contains(referencePath, "@") {
+		return "", true, fmt.Errorf("self repository reference '%s' must not include a version", uses)
+	}
+	if strings.Contains(referencePath, `\`) {
+		return "", true, fmt.Errorf("self repository reference '%s' must use forward slashes", uses)
+	}
+
+	referencePath = path.Clean(referencePath)
+	if referencePath == ".." || strings.HasPrefix(referencePath, "../") {
+		return "", true, fmt.Errorf("self repository reference '%s' must not escape the repository", uses)
+	}
+
+	return referencePath, true, nil
+}
+
 // Type returns the type of the step
 func (s *Step) Type() StepType {
 	if s.Run == "" && s.Uses == "" {
 		return StepTypeInvalid
+	}
+
+	uses := s.Uses
+	if selfPath, isSelf, err := ParseSelfRepositoryReference(uses); isSelf {
+		if err != nil {
+			return StepTypeInvalid
+		}
+		uses = "./" + selfPath
 	}
 
 	if s.Run != "" {
@@ -698,13 +742,13 @@ func (s *Step) Type() StepType {
 			return StepTypeInvalid
 		}
 		return StepTypeRun
-	} else if strings.HasPrefix(s.Uses, "docker://") {
+	} else if strings.HasPrefix(uses, "docker://") {
 		return StepTypeUsesDockerURL
-	} else if strings.HasPrefix(s.Uses, "./.github/workflows") && (strings.HasSuffix(s.Uses, ".yml") || strings.HasSuffix(s.Uses, ".yaml")) {
+	} else if strings.HasPrefix(uses, "./.github/workflows") && (strings.HasSuffix(uses, ".yml") || strings.HasSuffix(uses, ".yaml")) {
 		return StepTypeReusableWorkflowLocal
-	} else if !strings.HasPrefix(s.Uses, "./") && strings.Contains(s.Uses, ".github/workflows") && (strings.Contains(s.Uses, ".yml@") || strings.Contains(s.Uses, ".yaml@")) {
+	} else if !strings.HasPrefix(uses, "./") && strings.Contains(uses, ".github/workflows") && (strings.Contains(uses, ".yml@") || strings.Contains(uses, ".yaml@")) {
 		return StepTypeReusableWorkflowRemote
-	} else if strings.HasPrefix(s.Uses, "./") {
+	} else if strings.HasPrefix(uses, "./") && !strings.HasPrefix(s.Uses, "$/") {
 		return StepTypeUsesActionLocal
 	}
 	return StepTypeUsesActionRemote

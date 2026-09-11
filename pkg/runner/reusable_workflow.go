@@ -11,14 +11,23 @@ import (
 
 	"github.com/nektos/act/pkg/common"
 	"github.com/nektos/act/pkg/common/git"
+	"github.com/nektos/act/pkg/model"
 )
 
 func newLocalReusableWorkflowExecutor(rc *RunContext) common.Executor {
+	workflow, isSelf, err := model.ParseSelfRepositoryReference(rc.Run.Job().Uses)
+	if err != nil {
+		return common.NewErrorExecutor(err)
+	}
+	if !isSelf {
+		workflow = rc.Run.Job().Uses
+	}
+
 	source := rc.repositorySource
 	if source.directory == "" && source.actionCache == nil {
 		source.directory = rc.Config.Workdir
 	}
-	return newReusableWorkflowExecutor(rc, source, rc.Run.Job().Uses)
+	return newReusableWorkflowExecutor(rc, source, workflow)
 }
 
 func newRemoteReusableWorkflowExecutor(rc *RunContext) common.Executor {
@@ -41,7 +50,11 @@ func newRemoteReusableWorkflowExecutor(rc *RunContext) common.Executor {
 
 	return common.NewPipelineExecutor(
 		newMutexExecutor(cloneIfRequired(rc, *remoteReusableWorkflow, workflowDir)),
-		newReusableWorkflowExecutor(rc, repositorySource{directory: workflowDir}, fmt.Sprintf("./.github/workflows/%s", remoteReusableWorkflow.Filename)),
+		newReusableWorkflowExecutor(rc, repositorySource{
+			directory:  workflowDir,
+			repository: fmt.Sprintf("%s/%s", remoteReusableWorkflow.Org, remoteReusableWorkflow.Repo),
+			ref:        remoteReusableWorkflow.Ref,
+		}, fmt.Sprintf("./.github/workflows/%s", remoteReusableWorkflow.Filename)),
 	)
 }
 
@@ -57,6 +70,8 @@ func newActionCacheReusableWorkflowExecutor(rc *RunContext, filename string, rem
 			actionCache: rc.Config.ActionCache,
 			cacheDir:    filename,
 			sha:         sha,
+			repository:  fmt.Sprintf("%s/%s", remoteReusableWorkflow.Org, remoteReusableWorkflow.Repo),
+			ref:         remoteReusableWorkflow.Ref,
 		}
 		return newReusableWorkflowExecutor(rc, source, fmt.Sprintf(".github/workflows/%s", remoteReusableWorkflow.Filename))(ctx)
 	}

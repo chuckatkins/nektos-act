@@ -133,9 +133,10 @@ func maybeCopyToActionDir(ctx context.Context, step actionStep, actionDir string
 		containerActionDirCopy += `/`
 	}
 
-	if rc.Config != nil && rc.Config.ActionCache != nil {
-		raction := step.(*stepActionRemote)
-		ta, err := rc.Config.ActionCache.GetTarArchive(ctx, raction.cacheDir, raction.resolvedSha, "")
+	raction := step.(*stepActionRemote)
+	source := raction.repositorySource
+	if source.actionCache != nil {
+		ta, err := source.actionCache.GetTarArchive(ctx, source.cacheDir, source.sha, "")
 		if err != nil {
 			return err
 		}
@@ -143,8 +144,13 @@ func maybeCopyToActionDir(ctx context.Context, step actionStep, actionDir string
 		return rc.JobContainer.CopyTarStream(ctx, containerActionDirCopy, ta)
 	}
 
-	if err := removeGitIgnore(ctx, actionDir); err != nil {
-		return err
+	if source.directory != "" {
+		actionDir = source.directory
+	}
+	if filepath.Clean(actionDir) != filepath.Clean(rc.Config.Workdir) {
+		if err := removeGitIgnore(ctx, actionDir); err != nil {
+			return err
+		}
 	}
 
 	return rc.JobContainer.CopyDir(containerActionDirCopy, actionDir+"/", rc.Config.UseGitIgnore)(ctx)
@@ -170,6 +176,9 @@ func runActionImpl(step actionStep, actionDir string, remoteAction *remoteAction
 		}
 
 		actionLocation := path.Join(actionDir, actionPath)
+		if remote, ok := step.(*stepActionRemote); ok && remote.remoteAction != nil {
+			actionLocation = remote.actionLocation()
+		}
 		actionName, containerActionDir := getContainerActionPaths(stepModel, actionLocation, rc)
 
 		logger.Debugf("type=%v actionDir=%s actionPath=%s workdir=%s actionCacheDir=%s actionName=%s containerActionDir=%s", stepModel.Type(), actionDir, actionPath, rc.Config.Workdir, rc.ActionCacheDir(), actionName, containerActionDir)
@@ -293,9 +302,8 @@ func execAsDocker(ctx context.Context, step actionStep, actionName, basedir, sub
 					return err
 				}
 				defer buildContext.Close()
-			} else if rc.Config.ActionCache != nil {
-				rstep := step.(*stepActionRemote)
-				buildContext, err = rc.Config.ActionCache.GetTarArchive(ctx, rstep.cacheDir, rstep.resolvedSha, contextDir)
+			} else if remote, ok := step.(*stepActionRemote); ok && remote.repositorySource.actionCache != nil {
+				buildContext, err = remote.repositorySource.actionCache.GetTarArchive(ctx, remote.repositorySource.cacheDir, remote.repositorySource.sha, contextDir)
 				if err != nil {
 					return err
 				}
@@ -531,19 +539,17 @@ func runPreStep(step actionStep) common.Executor {
 		var actionPath string
 		var remoteAction *stepActionRemote
 		if remote, ok := step.(*stepActionRemote); ok {
-			actionPath = newRemoteAction(stepModel.Uses).Path
-			actionDir = fmt.Sprintf("%s/%s", rc.ActionCacheDir(), safeFilename(stepModel.Uses))
+			actionPath = remote.actionPath()
+			actionDir = remote.actionDir()
 			remoteAction = remote
 		} else {
 			actionDir = filepath.Join(rc.Config.Workdir, stepModel.Uses)
 			actionPath = ""
 		}
 
-		actionLocation := ""
-		if actionPath != "" {
-			actionLocation = path.Join(actionDir, actionPath)
-		} else {
-			actionLocation = actionDir
+		actionLocation := path.Join(actionDir, actionPath)
+		if remoteAction != nil {
+			actionLocation = remoteAction.actionLocation()
 		}
 
 		actionName, containerActionDir := getContainerActionPaths(stepModel, actionLocation, rc)
@@ -635,19 +641,17 @@ func runPostStep(step actionStep) common.Executor {
 		var actionPath string
 		var remoteAction *stepActionRemote
 		if remote, ok := step.(*stepActionRemote); ok {
-			actionPath = newRemoteAction(stepModel.Uses).Path
-			actionDir = fmt.Sprintf("%s/%s", rc.ActionCacheDir(), safeFilename(stepModel.Uses))
+			actionPath = remote.actionPath()
+			actionDir = remote.actionDir()
 			remoteAction = remote
 		} else {
 			actionDir = filepath.Join(rc.Config.Workdir, stepModel.Uses)
 			actionPath = ""
 		}
 
-		actionLocation := ""
-		if actionPath != "" {
-			actionLocation = path.Join(actionDir, actionPath)
-		} else {
-			actionLocation = actionDir
+		actionLocation := path.Join(actionDir, actionPath)
+		if remoteAction != nil {
+			actionLocation = remoteAction.actionLocation()
 		}
 
 		actionName, containerActionDir := getContainerActionPaths(stepModel, actionLocation, rc)
