@@ -1,0 +1,6 @@
+name: outer remote workflow
+on: workflow_call
+
+jobs:
+  nested:
+    uses: $/.github/workflows/inner.yml

@@ -1,0 +1,2 @@
+local-repositories:
+  owner/repo@ci: testdata/self-repository-remote/repository

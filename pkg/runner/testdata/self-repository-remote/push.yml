@@ -1,0 +1,6 @@
+name: self repository remote caller
+on: push
+
+jobs:
+  call:
+    uses: owner/repo/.github/workflows/outer.yml@ci

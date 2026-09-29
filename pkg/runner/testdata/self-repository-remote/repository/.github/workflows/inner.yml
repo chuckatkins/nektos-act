@@ -1,0 +1,8 @@
+name: inner remote workflow
+on: workflow_call
+
+jobs:
+  action:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: $/.github/actions/composite

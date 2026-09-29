@@ -255,6 +255,7 @@ func TestRunEvent(t *testing.T) {
 		{workdir, "remote-action-composite-action-ref", "push", "", platforms, secrets},
 		{workdir, "uses-workflow", "push", "", platforms, map[string]string{"secret": "keep_it_private"}},
 		{workdir, "uses-workflow", "pull_request", "", platforms, map[string]string{"secret": "keep_it_private"}},
+		{workdir, "self-repository-remote", "push", "", platforms, secrets},
 		{workdir, "uses-docker-url", "push", "", platforms, secrets},
 		{workdir, "act-composite-env-test", "push", "", platforms, secrets},
 

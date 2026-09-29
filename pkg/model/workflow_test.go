@@ -194,11 +194,13 @@ jobs:
     uses: ./some/path/to/workflow.yml
   local-reusable-workflow-yaml:
     uses: ./some/path/to/workflow.yaml
+  self-reusable-workflow:
+    uses: $/.github/workflows/workflow.yml
 `
 
 	workflow, err := ReadWorkflow(strings.NewReader(yaml), false)
 	assert.NoError(t, err, "read workflow should succeed")
-	assert.Len(t, workflow.Jobs, 6)
+	assert.Len(t, workflow.Jobs, 7)
 
 	jobType, err := workflow.Jobs["default-job"].Type()
 	assert.Equal(t, nil, err)
@@ -222,6 +224,10 @@ jobs:
 
 	jobType, err = workflow.Jobs["local-reusable-workflow-yaml"].Type()
 	assert.Equal(t, nil, err)
+	assert.Equal(t, JobTypeReusableWorkflowLocal, jobType)
+
+	jobType, err = workflow.Jobs["self-reusable-workflow"].Type()
+	assert.NoError(t, err)
 	assert.Equal(t, JobTypeReusableWorkflowLocal, jobType)
 }
 
@@ -284,6 +290,43 @@ jobs:
 
 	_, err := ReadWorkflow(strings.NewReader(yaml), false)
 	assert.Error(t, err, "read workflow should fail")
+}
+
+func TestParseSelfRepositoryReference(t *testing.T) {
+	tests := []struct {
+		name      string
+		uses      string
+		wantPath  string
+		wantSelf  bool
+		wantError string
+	}{
+		{name: "action", uses: "$/actions/build", wantPath: "actions/build", wantSelf: true},
+		{name: "clean path", uses: "$/actions/./build", wantPath: "actions/build", wantSelf: true},
+		{name: "local reference", uses: "./actions/build"},
+		{name: "empty", uses: "$/", wantSelf: true, wantError: "must include a path"},
+		{name: "version", uses: "$/actions/build@main", wantSelf: true, wantError: "must not include a version"},
+		{name: "backslash", uses: `$/actions\build`, wantSelf: true, wantError: "must use forward slashes"},
+		{name: "escape", uses: "$/actions/../../build", wantSelf: true, wantError: "must not escape the repository"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotPath, gotSelf, err := ParseSelfRepositoryReference(tt.uses)
+			assert.Equal(t, tt.wantPath, gotPath)
+			assert.Equal(t, tt.wantSelf, gotSelf)
+			if tt.wantError == "" {
+				assert.NoError(t, err)
+			} else {
+				assert.ErrorContains(t, err, tt.wantError)
+			}
+		})
+	}
+}
+
+func TestStepTypeSelfRepositoryReference(t *testing.T) {
+	assert.Equal(t, StepTypeUsesActionRemote, (&Step{Uses: "$/actions/build"}).Type())
+	assert.Equal(t, StepTypeReusableWorkflowLocal, (&Step{Uses: "$/.github/workflows/build.yml"}).Type())
+	assert.Equal(t, StepTypeInvalid, (&Step{Uses: "$/"}).Type())
 }
 
 // See: https://docs.github.com/en/actions/reference/workflow-syntax-for-github-actions#jobsjob_idoutputs
